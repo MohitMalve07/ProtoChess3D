@@ -10,7 +10,7 @@ public class GameModeSelector : MonoBehaviour
         // Find the GameManager if not assigned
         if (gameManager == null)
         {
-            gameManager = FindObjectOfType<GameManager>();
+            gameManager = FindAnyObjectByType<GameManager>();
         }
 
         // Ensure the game is paused and cursor is visible at the start

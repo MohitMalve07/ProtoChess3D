@@ -8,7 +8,7 @@ public class Knight : ChessPiece
 
     void Awake()
     {
-        gameManager = FindObjectOfType<GameManager>();
+        gameManager = FindAnyObjectByType<GameManager>();
         Initialize(startRow, startCol);
     }
 

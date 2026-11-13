@@ -8,15 +8,15 @@ public class King : ChessPiece
 
     void Awake()
     {
-        gameManager = FindObjectOfType<GameManager>();
+        gameManager = FindAnyObjectByType<GameManager>();
         Initialize(startRow, startCol);
     }
 
-    public override bool[,] GetLegalMoves()
+    public override bool[,] GetAttackSquares()
     {
-        bool[,] moves = new bool[8, 8];
+        bool[,] attacks = new bool[8, 8];
 
-        // The King can move one square in any of the 8 directions
+        // The King attacks one square in any of the 8 directions (excludes castling to avoid recursion)
         int[] rowOffsets = { 0, 0, 1, 1, 1, -1, -1, -1 };
         int[] colOffsets = { 1, -1, 0, 1, -1, 0, 1, -1 };
 
@@ -28,15 +28,59 @@ public class King : ChessPiece
             if (IsOnBoard(newRow, newCol))
             {
                 ChessPiece piece = gameManager.GetPieceAt(newRow, newCol);
-
-                // Check if the square is empty or occupied by an opponent
                 if (piece == null || piece.pieceColor != this.pieceColor)
                 {
-                    moves[newRow, newCol] = true;
+                    attacks[newRow, newCol] = true;
                 }
             }
         }
+        return attacks;
+    }
+
+    public override bool[,] GetLegalMoves()
+    {
+        bool[,] moves = GetAttackSquares();
+
+        int homeRow = (pieceColor == PieceColor.White) ? 0 : 7;
+        if (!hasMoved && currentRow == homeRow && currentCol == 4 && gameManager != null)
+        {
+            PieceColor opponentColor = (pieceColor == PieceColor.White) ? PieceColor.Black : PieceColor.White;
+            if (!gameManager.IsSquareAttacked(homeRow, 4, opponentColor))
+            {
+                // Kingside castling (e -> g, rook h -> f)
+                if (CanCastle(homeRow, 7, new[] { 5, 6 }, 5, opponentColor))
+                {
+                    moves[homeRow, 6] = true;
+                }
+
+                // Queenside castling (e -> c, rook a -> d)
+                if (CanCastle(homeRow, 0, new[] { 1, 2, 3 }, 3, opponentColor))
+                {
+                    moves[homeRow, 2] = true;
+                }
+            }
+        }
+
         return moves;
+    }
+
+    private bool CanCastle(int homeRow, int rookCol, int[] emptyCols, int passThroughCol, PieceColor opponentColor)
+    {
+        ChessPiece rook = gameManager.GetPieceAt(homeRow, rookCol);
+        if (rook == null || rook.pieceType != PieceType.Rook || rook.pieceColor != pieceColor || rook.hasMoved)
+        {
+            return false;
+        }
+
+        foreach (int col in emptyCols)
+        {
+            if (gameManager.GetPieceAt(homeRow, col) != null)
+            {
+                return false;
+            }
+        }
+
+        return !gameManager.IsSquareAttacked(homeRow, passThroughCol, opponentColor);
     }
 
     private bool IsOnBoard(int row, int col)

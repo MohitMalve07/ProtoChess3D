@@ -4,12 +4,11 @@ public class Pawn : ChessPiece
 {
     [SerializeField] private int startRow;
     [SerializeField] private int startCol;
-    private bool hasMoved = false;
     private GameManager gameManager;
 
     void Awake()
     {
-        gameManager = FindObjectOfType<GameManager>();
+        gameManager = FindAnyObjectByType<GameManager>();
         Initialize(startRow, startCol);
     }
 
@@ -32,7 +31,7 @@ public class Pawn : ChessPiece
             }
         }
 
-        // --- 3. Diagonal Capture Moves ---
+        // --- 3. Diagonal Capture & En Passant Moves ---
         int[] captureCols = { currentCol - 1, currentCol + 1 };
         foreach (int colOffset in captureCols)
         {
@@ -43,17 +42,32 @@ public class Pawn : ChessPiece
                 {
                     moves[oneStepRow, colOffset] = true;
                 }
+                else if (piece == null &&
+                         oneStepRow == gameManager.EnPassantTargetRow &&
+                         colOffset == gameManager.EnPassantTargetCol)
+                {
+                    moves[oneStepRow, colOffset] = true;
+                }
             }
         }
 
         return moves;
     }
 
-    // Override the base MoveToSquare to set the hasMoved flag
-    public override void MoveToSquare(int row, int col)
+    public override bool[,] GetAttackSquares()
     {
-        base.MoveToSquare(row, col); // Call the original method to move the piece
-        hasMoved = true;             // Set the flag after the first move
+        bool[,] attacks = new bool[8, 8];
+        int direction = (pieceColor == PieceColor.White) ? 1 : -1;
+        int attackRow = currentRow + direction;
+        int[] captureCols = { currentCol - 1, currentCol + 1 };
+        foreach (int colOffset in captureCols)
+        {
+            if (IsOnBoard(attackRow, colOffset))
+            {
+                attacks[attackRow, colOffset] = true;
+            }
+        }
+        return attacks;
     }
 
     private bool IsOnBoard(int row, int col)

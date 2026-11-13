@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 public class BoardLayout : MonoBehaviour
@@ -10,11 +11,20 @@ public class BoardLayout : MonoBehaviour
 
     // A 2D array to hold references to all the squares (GameObjects) on the board
     private GameObject[,] squares = new GameObject[8, 8];
-    private Material[] originalMaterials = new Material[64]; // Array to store original materials for reverting
+    private Renderer[,] squareRenderers = new Renderer[8, 8];
+    private Material[] originalMaterials = new Material[64];
+    private readonly Dictionary<GameObject, int> squareIndexMap = new Dictionary<GameObject, int>(64);
     private GameObject lastHighlightedSquare = null;
+    private int tileLayer = -1;
+    private int tileLayerMask = Physics.DefaultRaycastLayers;
 
     void Awake()
     {
+        tileLayer = LayerMask.NameToLayer("Tile");
+        if (tileLayer >= 0)
+        {
+            tileLayerMask = 1 << tileLayer;
+        }
         GenerateBoard();
     }
 
@@ -23,21 +33,25 @@ public class BoardLayout : MonoBehaviour
     /// </summary>
     private void GenerateBoard()
     {
+        float step = squareSize + squareSpacing;
         for (int row = 0; row < 8; row++)
         {
             for (int col = 0; col < 8; col++)
             {
-                // Calculate the position for the current square
-                Vector3 position = new Vector3(col * (squareSize + squareSpacing), 0, row * (squareSize + squareSpacing));
-
-                // Instantiate the square prefab and store it in the array
+                Vector3 position = new Vector3(col * step, 0, row * step);
                 GameObject square = Instantiate(squarePrefab, position, Quaternion.identity, this.transform);
-
-                // Set the name of the tile for easy debugging
                 square.name = $"X:{col},Y:{row}";
+                if (tileLayer >= 0)
+                {
+                    square.layer = tileLayer;
+                }
 
+                int index = row * 8 + col;
+                Renderer rend = square.GetComponent<Renderer>();
                 squares[row, col] = square;
-                originalMaterials[row * 8 + col] = square.GetComponent<Renderer>().material;
+                squareRenderers[row, col] = rend;
+                originalMaterials[index] = rend != null ? rend.sharedMaterial : null;
+                squareIndexMap[square] = index;
             }
         }
     }
@@ -45,9 +59,6 @@ public class BoardLayout : MonoBehaviour
     /// <summary>
     /// Returns the world position of the square at the given row and column.
     /// </summary>
-    /// <param name="row">The row index (0-7).</param>
-    /// <param name="col">The column index (0-7).</param>
-    /// <returns>The Vector3 world position of the square.</returns>
     public Vector3 GetSquarePosition(int row, int col)
     {
         if (row < 0 || row >= 8 || col < 0 || col >= 8)
@@ -56,9 +67,34 @@ public class BoardLayout : MonoBehaviour
             return Vector3.zero;
         }
 
-        // Return the position of the square, adjusted to be centered on the origin
-        Vector3 squarePosition = squares[row, col].transform.position;
-        return squarePosition;
+        return squares[row, col].transform.position;
+    }
+
+    /// <summary>
+    /// Returns the world position for a piece or highlight centered over (row, col) at height y.
+    /// </summary>
+    public Vector3 GetSquareWorldPosition(int row, int col, float y)
+    {
+        float step = squareSize + squareSpacing;
+        return new Vector3(col * step, y, row * step);
+    }
+
+    /// <summary>
+    /// Converts a tile's world position into board (row, col) indices respecting squareSize and squareSpacing.
+    /// </summary>
+    public bool TryGetBoardCoordinates(Vector3 worldPos, out int row, out int col)
+    {
+        float step = squareSize + squareSpacing;
+        if (step <= 0f)
+        {
+            row = -1;
+            col = -1;
+            return false;
+        }
+
+        col = Mathf.RoundToInt(worldPos.x / step);
+        row = Mathf.RoundToInt(worldPos.z / step);
+        return row >= 0 && row < 8 && col >= 0 && col < 8;
     }
 
     void Update()
@@ -68,53 +104,43 @@ public class BoardLayout : MonoBehaviour
 
     private void HandleHighlight()
     {
+        if (Camera.main == null) return;
+
         Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
         RaycastHit hit;
 
-        if (Physics.Raycast(ray, out hit))
+        if (Physics.Raycast(ray, out hit, 100f, tileLayerMask))
         {
             GameObject hitSquare = hit.collider.gameObject;
-
-            // Check if the raycast hit a square on the board
-            if (hitSquare.GetComponent<Renderer>() != null)
+            if (squareIndexMap.ContainsKey(hitSquare))
             {
-                // If we've hit a new square, and it's not the one we're already highlighting
                 if (lastHighlightedSquare != hitSquare)
                 {
-                    // Revert the last highlighted square's material if it exists
-                    if (lastHighlightedSquare != null)
+                    RevertLastHighlight();
+                    Renderer rend = hitSquare.GetComponent<Renderer>();
+                    if (rend != null)
                     {
-                        int index = GetSquareIndex(lastHighlightedSquare.name);
-                        lastHighlightedSquare.GetComponent<Renderer>().material = originalMaterials[index];
+                        rend.sharedMaterial = highlightMaterial;
                     }
-
-                    // Apply the highlight material to the new square
-                    hitSquare.GetComponent<Renderer>().material = highlightMaterial;
                     lastHighlightedSquare = hitSquare;
                 }
+                return;
             }
         }
-        else
-        {
-            // If the raycast is no longer hitting anything, revert the last highlighted square
-            if (lastHighlightedSquare != null)
-            {
-                int index = GetSquareIndex(lastHighlightedSquare.name);
-                lastHighlightedSquare.GetComponent<Renderer>().material = originalMaterials[index];
-                lastHighlightedSquare = null;
-            }
-        }
+
+        RevertLastHighlight();
     }
 
-    /// <summary>
-    /// Gets the index of the square from its name.
-    /// This is a helper method to find the correct index in the originalMaterials array.
-    /// </summary>
-    private int GetSquareIndex(string squareName)
+    private void RevertLastHighlight()
     {
-        string[] parts = squareName.Split(',');
-        int col = int.Parse(parts[0].Replace("X:", ""));
-        int row = int.Parse(parts[1].Replace("Y:", ""));
-        return row * 8 + col;
+        if (lastHighlightedSquare != null && squareIndexMap.TryGetValue(lastHighlightedSquare, out int index))
+        {
+            Renderer rend = lastHighlightedSquare.GetComponent<Renderer>();
+            if (rend != null)
+            {
+                rend.sharedMaterial = originalMaterials[index];
+            }
+            lastHighlightedSquare = null;
+        }
     }
 }

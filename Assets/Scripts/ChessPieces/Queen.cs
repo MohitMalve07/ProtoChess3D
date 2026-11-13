@@ -8,7 +8,7 @@ public class Queen : ChessPiece
 
     void Awake()
     {
-        gameManager = FindObjectOfType<GameManager>();
+        gameManager = FindAnyObjectByType<GameManager>();
         Initialize(startRow, startCol);
     }
 
