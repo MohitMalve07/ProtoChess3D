@@ -17,11 +17,38 @@ public class CameraToggle : MonoBehaviour
     private Vector3 blackSidePosition_Tactical = new Vector3(3.5f, 10f, 6.5f);
     private Quaternion blackSideRotation_Tactical = Quaternion.Euler(75f, -180f, 0f);
 
+    // --- Main Menu Camera ---
+    [Header("Main Menu Camera")]
+    [SerializeField] private bool startInMainMenu = true;
+    [SerializeField] private Vector3 mainMenuPosition = new Vector3(5.8f, 6.2f, -3.5f);
+    [SerializeField] private Vector3 mainMenuEulerRotation = new Vector3(43f, -40.5f, 0f);
+
     // --- State Variables ---
+    private bool isMainMenu = true;
     private bool isBlackSide = false;
     private bool isTacticalView = false; // Flag to track the current view mode
     private float smoothness = 5.0f;
     private bool lockCamera = false; // --- NEW: Prevents rotation in PvAI ---
+
+    void Awake()
+    {
+        if (mainCamera == null) mainCamera = Camera.main;
+        isMainMenu = startInMainMenu;
+        if (isMainMenu && mainCamera != null)
+        {
+            mainCamera.transform.SetPositionAndRotation(mainMenuPosition, Quaternion.Euler(mainMenuEulerRotation));
+        }
+    }
+
+    /// <summary>
+    /// Transitions the camera from the Main Menu showcase angle into the gameplay angle.
+    /// </summary>
+    public void ExitMainMenu()
+    {
+        isMainMenu = false;
+        isBlackSide = false;
+        isTacticalView = false;
+    }
 
     /// <summary>
     /// Configures the camera behavior based on the game mode.
@@ -49,8 +76,10 @@ public class CameraToggle : MonoBehaviour
 
     void Update()
     {
+        if (mainCamera == null) return;
+
         // Check for the "T" key press to toggle the view mode
-        if (Input.GetKeyDown(KeyCode.T))
+        if (!isMainMenu && Input.GetKeyDown(KeyCode.T))
         {
             isTacticalView = !isTacticalView;
         }
@@ -59,7 +88,12 @@ public class CameraToggle : MonoBehaviour
         Vector3 targetPosition;
         Quaternion targetRotation;
 
-        if (isBlackSide)
+        if (isMainMenu)
+        {
+            targetPosition = mainMenuPosition;
+            targetRotation = Quaternion.Euler(mainMenuEulerRotation);
+        }
+        else if (isBlackSide)
         {
             // Set target for Black's turn
             targetPosition = isTacticalView ? blackSidePosition_Tactical : blackSidePosition_Standard;

@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
 using System.Collections.Generic;
 using System.Collections;
@@ -23,6 +24,7 @@ public class GameManager : MonoBehaviour
     public enum GameMode { PvP, PvAI }
     private GameMode currentMode;
     private bool isGameActive = false;
+    private int gameStartFrame = -1;
 
     // --- Private Game State ---
     private Dictionary<Vector2, ChessPiece> occupiedSquares = new Dictionary<Vector2, ChessPiece>();
@@ -58,13 +60,14 @@ public class GameManager : MonoBehaviour
 
     void Update()
     {
-        if (isGameOver || !isGameActive) return;
+        if (isGameOver || !isGameActive || Time.frameCount == gameStartFrame) return;
 
         // --- Prevent player input during AI's turn ---
         if (currentMode == GameMode.PvAI && currentPlayerTurn == PieceColor.Black) return;
 
         if (Input.GetMouseButtonDown(0))
         {
+            if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject()) return;
             Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
             RaycastHit hit;
 
@@ -111,9 +114,11 @@ public class GameManager : MonoBehaviour
     {
         currentMode = (GameMode)mode;
         isGameActive = true;
+        gameStartFrame = Time.frameCount;
 
         if (cameraToggle != null)
         {
+            cameraToggle.ExitMainMenu();
             cameraToggle.ConfigureForSinglePlayer(currentMode == GameMode.PvAI);
         }
 
