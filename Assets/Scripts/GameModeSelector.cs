@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.UI;
 
 public class GameModeSelector : MonoBehaviour
 {
@@ -9,6 +10,14 @@ public class GameModeSelector : MonoBehaviour
     public GameObject mainPanel;
     public GameObject buttonsContainer;
     public GameObject howToPlayPanel;
+    public GameObject shadowsPanel;
+
+    [Header("Shadows Toggle")]
+    public Toggle shadowsToggle;
+    public Image shadowsToggleImage;
+    public Sprite toggleOffSprite;
+    public Sprite toggleOnSprite;
+    public Light directionalLight;
 
     void Start()
     {
@@ -21,6 +30,35 @@ public class GameModeSelector : MonoBehaviour
         if (mainPanel == null) mainPanel = transform.Find("Panel")?.gameObject;
         if (buttonsContainer == null) buttonsContainer = transform.Find("Buttons")?.gameObject;
         if (howToPlayPanel == null) howToPlayPanel = transform.Find("How to Play")?.gameObject;
+        if (shadowsPanel == null) shadowsPanel = transform.Find("Shadows Panel")?.gameObject;
+
+        if (shadowsToggle == null && shadowsPanel != null)
+        {
+            shadowsToggle = shadowsPanel.GetComponentInChildren<Toggle>(true);
+        }
+
+        if (shadowsToggleImage == null && shadowsToggle != null)
+        {
+            shadowsToggleImage = shadowsToggle.targetGraphic as Image ?? shadowsToggle.GetComponentInChildren<Image>(true);
+        }
+
+        if (directionalLight == null)
+        {
+            foreach (Light l in FindObjectsByType<Light>())
+            {
+                if (l.type == LightType.Directional)
+                {
+                    directionalLight = l;
+                    break;
+                }
+            }
+        }
+
+        if (shadowsToggle != null)
+        {
+            shadowsToggle.SetIsOnWithoutNotify(false);
+        }
+        ApplyShadowState(false);
 
         CloseHowToPlay();
 
@@ -52,6 +90,7 @@ public class GameModeSelector : MonoBehaviour
     {
         if (mainPanel != null) mainPanel.SetActive(false);
         if (buttonsContainer != null) buttonsContainer.SetActive(false);
+        if (shadowsPanel != null) shadowsPanel.SetActive(false);
         if (howToPlayPanel != null) howToPlayPanel.SetActive(true);
     }
 
@@ -60,6 +99,29 @@ public class GameModeSelector : MonoBehaviour
         if (howToPlayPanel != null) howToPlayPanel.SetActive(false);
         if (mainPanel != null) mainPanel.SetActive(true);
         if (buttonsContainer != null) buttonsContainer.SetActive(true);
+        if (shadowsPanel != null) shadowsPanel.SetActive(true);
+    }
+
+    public void OnShadowsToggleChanged(bool isOn)
+    {
+        ApplyShadowState(isOn);
+    }
+
+    private void ApplyShadowState(bool isOn)
+    {
+        if (shadowsToggleImage != null)
+        {
+            Sprite targetSprite = isOn ? toggleOnSprite : toggleOffSprite;
+            if (targetSprite != null)
+            {
+                shadowsToggleImage.sprite = targetSprite;
+            }
+        }
+
+        if (directionalLight != null)
+        {
+            directionalLight.shadows = isOn ? LightShadows.Soft : LightShadows.None;
+        }
     }
 
     public void QuitGame()
