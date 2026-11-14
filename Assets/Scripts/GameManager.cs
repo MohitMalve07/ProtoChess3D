@@ -42,8 +42,8 @@ public class GameManager : MonoBehaviour
     public TextMeshProUGUI gameStatusText; // --- NEW: Drag your UI Text here ---
     public GameObject whiteQueenPrefab;
     public GameObject blackQueenPrefab;
-    [SerializeField] private int aiSearchDepth = 5;
-    [SerializeField] private int aiThinkTimeMs = 1500;
+    [SerializeField] private int aiSearchDepth = 7;
+    [SerializeField] private int aiThinkTimeMs = 2500;
 
     [Header("HUD & Timer")]
     public GameObject hudCanvas;
