@@ -54,6 +54,11 @@ public class GameManager : MonoBehaviour
     public Button drawButton;
     [SerializeField] private float initialTimeSeconds = 900f; // 15 minutes per side
 
+    [Header("Piece Hover Tooltip")]
+    [SerializeField] private RectTransform pieceTooltipRoot;
+    [SerializeField] private TextMeshProUGUI pieceTooltipText;
+    [SerializeField] private Vector2 pieceTooltipOffset = new Vector2(18f, 22f);
+
     public int EnPassantTargetRow { get; private set; } = -1;
     public int EnPassantTargetCol { get; private set; } = -1;
 
@@ -78,6 +83,9 @@ public class GameManager : MonoBehaviour
     private Task<MinimaxAI.AIMove> activeAiTask;
     private bool isAIThinking = false;
     private bool forceCoroutineAISearch = false;
+    private bool drawOfferedThisTurn = false;
+    private ChessPiece hoveredPiece;
+    private Canvas hudRootCanvas;
 
     // --- Component References ---
     private CameraToggle cameraToggle;
@@ -111,15 +119,26 @@ public class GameManager : MonoBehaviour
 
         // Ensure UI starts clean
         if (gameStatusText != null) gameStatusText.text = "";
+        HidePieceTooltip();
         UpdateActionButtons();
     }
 
     void Update()
     {
-        if (isGameOver || !isGameActive) return;
+        if (isGameOver || !isGameActive)
+        {
+            HidePieceTooltip();
+            return;
+        }
 
         TickTimers();
-        if (isGameOver || Time.frameCount == gameStartFrame) return;
+        if (isGameOver || Time.frameCount == gameStartFrame)
+        {
+            HidePieceTooltip();
+            return;
+        }
+
+        UpdatePieceHoverTooltipAt(Input.mousePosition);
 
         // --- Prevent player input during AI's turn ---
         if (isAIThinking || (currentMode == GameMode.PvAI && currentPlayerTurn == PieceColor.Black)) return;
@@ -179,6 +198,7 @@ public class GameManager : MonoBehaviour
 
         CancelAISearch();
         moveHistory.Clear();
+        drawOfferedThisTurn = false;
 
         whiteTimeRemaining = initialTimeSeconds;
         blackTimeRemaining = initialTimeSeconds;
@@ -205,6 +225,7 @@ public class GameManager : MonoBehaviour
             gameModeSelectorCanvas.SetActive(false);
         }
 
+        HidePieceTooltip();
         UpdateActionButtons();
     }
 
@@ -239,6 +260,7 @@ public class GameManager : MonoBehaviour
             cameraToggle.SetBlackSide(currentPlayerTurn == PieceColor.Black);
         }
 
+        drawOfferedThisTurn = false;
         CheckForGameOver();
         UpdateActionButtons();
     }
@@ -256,7 +278,53 @@ public class GameManager : MonoBehaviour
     public void DrawGame()
     {
         if (!isGameActive || isGameOver) return;
-        EndGameWithResult("Draw!\nGame Ended in a Draw.");
+
+        if (currentMode != GameMode.PvAI)
+        {
+            EndGameWithResult("Draw!\nGame Ended in a Draw.");
+            return;
+        }
+
+        if (isAIThinking || drawOfferedThisTurn) return;
+
+        if (ai == null)
+        {
+            EndGameWithResult("Draw!\nGame Ended in a Draw.");
+            return;
+        }
+
+        MinimaxAI.InternalPiece[,] snapshot = BuildInternalBoardSnapshot();
+        MinimaxAI.SearchRights rights = BuildSearchRights();
+        int aiScore = ai.EvaluatePositionScore(snapshot, currentPlayerTurn, rights, 3, 250);
+        int acceptThreshold = GetAIDrawAcceptThreshold(aiScore);
+
+        if (aiScore <= acceptThreshold)
+        {
+            EndGameWithResult("Draw Accepted!\nGame Ended in a Draw.");
+            return;
+        }
+
+        drawOfferedThisTurn = true;
+        if (gameStatusText != null)
+        {
+            gameStatusText.text = "AI Declined\nthe Draw.";
+        }
+        UpdateActionButtons();
+    }
+
+    private int GetAIDrawAcceptThreshold(int aiScore)
+    {
+        if (blackTimeRemaining < 20f && aiScore < 500)
+        {
+            return 150;
+        }
+
+        if (whiteTimeRemaining < 15f)
+        {
+            return -200;
+        }
+
+        return 50;
     }
 
     private void UndoSinglePly()
@@ -323,6 +391,111 @@ public class GameManager : MonoBehaviour
             resignButton = hudCanvas.transform.Find("Buttons/Resign")?.GetComponent<Button>();
         if (drawButton == null)
             drawButton = hudCanvas.transform.Find("Buttons/Draw")?.GetComponent<Button>();
+
+        hudRootCanvas = hudCanvas.GetComponent<Canvas>();
+        if (pieceTooltipRoot == null)
+            pieceTooltipRoot = hudCanvas.transform.Find("Piece_Tooltip") as RectTransform;
+        if (pieceTooltipText == null && pieceTooltipRoot != null)
+            pieceTooltipText = pieceTooltipRoot.GetComponentInChildren<TextMeshProUGUI>(true);
+
+        if (pieceTooltipRoot != null)
+        {
+            Image bg = pieceTooltipRoot.GetComponent<Image>();
+            if (bg != null) bg.raycastTarget = false;
+        }
+        if (pieceTooltipText != null)
+        {
+            pieceTooltipText.raycastTarget = false;
+        }
+
+        if (gameStatusText != null)
+        {
+            gameStatusText.enableAutoSizing = true;
+            gameStatusText.fontSizeMin = 28f;
+            gameStatusText.fontSizeMax = 48f;
+        }
+    }
+
+    private void UpdatePieceHoverTooltipAt(Vector3 screenPosition)
+    {
+        if (pieceTooltipRoot == null || pieceTooltipText == null) return;
+
+        if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
+        {
+            HidePieceTooltip();
+            return;
+        }
+
+        Camera cam = Camera.main;
+        if (cam == null)
+        {
+            HidePieceTooltip();
+            return;
+        }
+
+        Ray ray = cam.ScreenPointToRay(screenPosition);
+        if (Physics.Raycast(ray, out RaycastHit hit, 100f, chessPieceLayer))
+        {
+            ChessPiece piece = hit.collider.GetComponent<ChessPiece>() ?? hit.collider.GetComponentInParent<ChessPiece>();
+            if (piece != null && piece.pieceType != PieceType.None)
+            {
+                if (hoveredPiece != piece)
+                {
+                    hoveredPiece = piece;
+                    pieceTooltipText.text = FormatPieceDisplayName(piece);
+                }
+
+                if (!pieceTooltipRoot.gameObject.activeSelf)
+                {
+                    pieceTooltipRoot.gameObject.SetActive(true);
+                }
+
+                PositionPieceTooltip(screenPosition);
+                return;
+            }
+        }
+
+        HidePieceTooltip();
+    }
+
+    private void PositionPieceTooltip(Vector3 screenPosition)
+    {
+        RectTransform canvasRect = hudRootCanvas != null ? hudRootCanvas.transform as RectTransform : pieceTooltipRoot.parent as RectTransform;
+        if (canvasRect == null) return;
+
+        Camera eventCam = (hudRootCanvas != null && hudRootCanvas.renderMode != RenderMode.ScreenSpaceOverlay) ? hudRootCanvas.worldCamera : null;
+        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRect, screenPosition, eventCam, out Vector2 localPoint)) return;
+
+        Vector2 targetPos = localPoint + pieceTooltipOffset;
+        Rect bounds = canvasRect.rect;
+        Vector2 size = pieceTooltipRoot.rect.size;
+        Vector2 pivot = pieceTooltipRoot.pivot;
+        const float edgeMargin = 12f;
+
+        float minX = bounds.xMin + size.x * pivot.x + edgeMargin;
+        float maxX = bounds.xMax - size.x * (1f - pivot.x) - edgeMargin;
+        float minY = bounds.yMin + size.y * pivot.y + edgeMargin;
+        float maxY = bounds.yMax - size.y * (1f - pivot.y) - edgeMargin;
+
+        targetPos.x = Mathf.Clamp(targetPos.x, minX, maxX);
+        targetPos.y = Mathf.Clamp(targetPos.y, minY, maxY);
+        pieceTooltipRoot.anchoredPosition = targetPos;
+    }
+
+    private void HidePieceTooltip()
+    {
+        hoveredPiece = null;
+        if (pieceTooltipRoot != null && pieceTooltipRoot.gameObject.activeSelf)
+        {
+            pieceTooltipRoot.gameObject.SetActive(false);
+        }
+    }
+
+    private static string FormatPieceDisplayName(ChessPiece piece)
+    {
+        string colorLabel = piece.pieceColor == PieceColor.White ? "WHITE" : "BLACK";
+        string typeLabel = piece.pieceType.ToString().ToUpperInvariant();
+        return $"{colorLabel} {typeLabel}";
     }
 
     private void TickTimers()
@@ -379,7 +552,11 @@ public class GameManager : MonoBehaviour
         bool activeMatch = isGameActive && !isGameOver;
         if (undoButton != null) undoButton.interactable = activeMatch && moveHistory.Count > 0;
         if (resignButton != null) resignButton.interactable = activeMatch;
-        if (drawButton != null) drawButton.interactable = activeMatch;
+        if (drawButton != null)
+        {
+            bool drawBlockedByAI = currentMode == GameMode.PvAI && (drawOfferedThisTurn || isAIThinking);
+            drawButton.interactable = activeMatch && !drawBlockedByAI;
+        }
     }
 
     private void EndGameWithResult(string message)
@@ -387,6 +564,7 @@ public class GameManager : MonoBehaviour
         isGameOver = true;
         CancelAISearch();
         DeselectPiece();
+        HidePieceTooltip();
         if (gameStatusText != null) gameStatusText.text = message;
         UpdateActionButtons();
     }
@@ -564,6 +742,7 @@ public class GameManager : MonoBehaviour
         currentPlayerTurn = (currentPlayerTurn == PieceColor.White) ? PieceColor.Black : PieceColor.White;
         if (cameraToggle != null) cameraToggle.ToggleView();
 
+        drawOfferedThisTurn = false;
         CheckForGameOver();
         UpdateActionButtons();
 
@@ -576,6 +755,7 @@ public class GameManager : MonoBehaviour
     private IEnumerator TriggerAIMove()
     {
         isAIThinking = true;
+        UpdateActionButtons();
 
         // Ensure any previously cancelled search finishes before reusing MinimaxAI's internal TT buffer
         while (activeAiTask != null && !activeAiTask.IsCompleted)
@@ -594,25 +774,11 @@ public class GameManager : MonoBehaviour
         {
             isAIThinking = false;
             aiCoroutine = null;
+            UpdateActionButtons();
             yield break;
         }
 
-        MinimaxAI.InternalPiece[,] currentBoard = new MinimaxAI.InternalPiece[8, 8];
-        for (int r = 0; r < 8; r++)
-        {
-            for (int c = 0; c < 8; c++)
-            {
-                ChessPiece piece = GetPieceAt(r, c);
-                if (piece != null)
-                {
-                    currentBoard[r, c] = new MinimaxAI.InternalPiece { type = piece.pieceType, color = piece.pieceColor };
-                }
-                else
-                {
-                    currentBoard[r, c] = new MinimaxAI.InternalPiece { type = PieceType.None, color = PieceColor.White };
-                }
-            }
-        }
+        MinimaxAI.InternalPiece[,] currentBoard = BuildInternalBoardSnapshot();
 
         MinimaxAI.SearchRights rights = BuildSearchRights();
         int depth = Mathf.Max(1, aiSearchDepth);
@@ -795,6 +961,11 @@ public class GameManager : MonoBehaviour
                 EndGameWithResult("Stalemate!\nIt's a draw.");
             }
         }
+        else if (HasInsufficientMaterial())
+        {
+            Debug.Log("INSUFFICIENT MATERIAL! It's a draw!");
+            EndGameWithResult("Draw!\nInsufficient Material.");
+        }
         else
         {
             // Game continues, but check if King is currently under attack (Check)
@@ -807,6 +978,75 @@ public class GameManager : MonoBehaviour
                 if (gameStatusText != null) gameStatusText.text = ""; // Clear text if safe
             }
         }
+    }
+
+    private bool HasInsufficientMaterial()
+    {
+        int whiteKnights = 0;
+        int blackKnights = 0;
+        int whiteBishops = 0;
+        int blackBishops = 0;
+        int whiteBishopParity = -1;
+        int blackBishopParity = -1;
+
+        for (int r = 0; r < 8; r++)
+        {
+            for (int c = 0; c < 8; c++)
+            {
+                ChessPiece piece = GetPieceAt(r, c);
+                if (piece == null || piece.pieceType == PieceType.King) continue;
+
+                switch (piece.pieceType)
+                {
+                    case PieceType.Pawn:
+                    case PieceType.Rook:
+                    case PieceType.Queen:
+                        return false;
+                    case PieceType.Knight:
+                        if (piece.pieceColor == PieceColor.White) whiteKnights++;
+                        else blackKnights++;
+                        break;
+                    case PieceType.Bishop:
+                        int parity = (r + c) % 2;
+                        if (piece.pieceColor == PieceColor.White)
+                        {
+                            whiteBishops++;
+                            whiteBishopParity = parity;
+                        }
+                        else
+                        {
+                            blackBishops++;
+                            blackBishopParity = parity;
+                        }
+                        break;
+                }
+            }
+        }
+
+        int totalMinors = whiteKnights + blackKnights + whiteBishops + blackBishops;
+        if (totalMinors <= 1) return true;
+
+        return whiteBishops == 1
+            && blackBishops == 1
+            && whiteKnights == 0
+            && blackKnights == 0
+            && whiteBishopParity == blackBishopParity;
+    }
+
+    private MinimaxAI.InternalPiece[,] BuildInternalBoardSnapshot()
+    {
+        MinimaxAI.InternalPiece[,] board = new MinimaxAI.InternalPiece[8, 8];
+        for (int r = 0; r < 8; r++)
+        {
+            for (int c = 0; c < 8; c++)
+            {
+                ChessPiece piece = GetPieceAt(r, c);
+                board[r, c] = piece != null
+                    ? new MinimaxAI.InternalPiece { type = piece.pieceType, color = piece.pieceColor }
+                    : new MinimaxAI.InternalPiece { type = PieceType.None, color = PieceColor.White };
+            }
+        }
+        return board;
     }
 
     #endregion

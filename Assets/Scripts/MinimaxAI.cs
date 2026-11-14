@@ -318,6 +318,57 @@ public class MinimaxAI : MonoBehaviour
     }
 
     /// <summary>
+    /// Runs a fast iterative-deepening search (with quiescence) to evaluate the position
+    /// in centipawns from Black's (AI) perspective: positive favors Black, negative favors White.
+    /// </summary>
+    public int EvaluatePositionScore(InternalPiece[,] board, PieceColor sideToMove, SearchRights rights, int maxDepth = 3, int timeLimitMs = 250)
+    {
+        if (board == null) return 0;
+
+        lock (searchLock)
+        {
+            SearchContext ctx = reusableContext;
+            Array.Copy(board, ctx.board, 64);
+            ctx.ClearHeuristics();
+            ctx.timeLimitMs = timeLimitMs;
+            ctx.ignoreTimeLimit = false;
+            ctx.cancellationToken = CancellationToken.None;
+            ctx.cancelPredicate = null;
+            ctx.nodes = 0;
+
+            searchGeneration++;
+            if (searchGeneration == 0) searchGeneration = 1;
+            ctx.ttGeneration = searchGeneration;
+            ctx.stopwatch.Restart();
+
+            ulong rootHash = ComputeHash(ctx.board, sideToMove, rights);
+            bool isMaximizing = sideToMove == PieceColor.Black;
+            int bestScore = Evaluate(ctx.board);
+
+            for (int depth = 1; depth <= maxDepth; depth++)
+            {
+                if (depth > 1 && ShouldStopSearch(ctx, timeLimitMs))
+                {
+                    break;
+                }
+
+                ctx.ignoreTimeLimit = depth == 1;
+                try
+                {
+                    bestScore = NegamaxMinimax(ctx, depth, 0, -Infinity, Infinity, isMaximizing, rights, rootHash);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
+
+            ctx.stopwatch.Stop();
+            return bestScore;
+        }
+    }
+
+    /// <summary>
     /// Time-sliced iterative deepening coroutine for single-threaded platforms (such as WebGL without threads).
     /// Yields between root moves whenever <paramref name="frameBudgetMs"/> is exceeded and between depths.
     /// </summary>
