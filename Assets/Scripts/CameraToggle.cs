@@ -74,6 +74,15 @@ public class CameraToggle : MonoBehaviour
         isBlackSide = !isBlackSide;
     }
 
+    /// <summary>
+    /// Explicitly aligns the camera side when unlocked (used by Undo).
+    /// </summary>
+    public void SetBlackSide(bool blackSide)
+    {
+        if (lockCamera) return;
+        isBlackSide = blackSide;
+    }
+
     void Update()
     {
         if (mainCamera == null) return;

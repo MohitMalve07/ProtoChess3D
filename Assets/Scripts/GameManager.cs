@@ -1,21 +1,58 @@
 using UnityEngine;
 using UnityEngine.EventSystems;
-using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 using System.Collections.Generic;
 using System.Collections;
+using System.Threading;
+using System.Threading.Tasks;
 using TMPro; // --- NEW: Required for UI Text ---
 
 public class GameManager : MonoBehaviour
 {
+    private class MoveSnapshot
+    {
+        public ChessPiece movedPiece;
+        public int fromRow;
+        public int fromCol;
+        public bool fromHasMoved;
+        public int toRow;
+        public int toCol;
+
+        public ChessPiece capturedPiece;
+        public int capturedRow;
+        public int capturedCol;
+
+        public ChessPiece castlingRook;
+        public int rookFromCol;
+        public int rookToCol;
+        public bool rookFromHasMoved;
+
+        public ChessPiece promotedQueen;
+        public bool promotedPrefabUsed;
+
+        public int prevEnPassantRow;
+        public int prevEnPassantCol;
+        public PieceColor prevTurn;
+    }
+
     // --- Public Fields & Properties ---
     public LayerMask chessPieceLayer;
     public GameObject moveHighlightPrefab;
     public GameObject gameModeSelectorCanvas;
     public TextMeshProUGUI gameStatusText; // --- NEW: Drag your UI Text here ---
-    public GameObject restartButton;
     public GameObject whiteQueenPrefab;
     public GameObject blackQueenPrefab;
-    [SerializeField] private int aiSearchDepth = 3;
+    [SerializeField] private int aiSearchDepth = 5;
+    [SerializeField] private int aiThinkTimeMs = 1500;
+
+    [Header("HUD & Timer")]
+    public GameObject hudCanvas;
+    public TextMeshProUGUI playerTimerText;
+    public TextMeshProUGUI opponentTimerText;
+    public Button undoButton;
+    public Button resignButton;
+    public Button drawButton;
+    [SerializeField] private float initialTimeSeconds = 900f; // 15 minutes per side
 
     public int EnPassantTargetRow { get; private set; } = -1;
     public int EnPassantTargetCol { get; private set; } = -1;
@@ -28,11 +65,18 @@ public class GameManager : MonoBehaviour
 
     // --- Private Game State ---
     private Dictionary<Vector2, ChessPiece> occupiedSquares = new Dictionary<Vector2, ChessPiece>();
+    private readonly Stack<MoveSnapshot> moveHistory = new Stack<MoveSnapshot>();
     private ChessPiece selectedPiece = null;
     private List<GameObject> activeHighlights = new List<GameObject>();
     private bool[,] legalMovesGrid;
     private PieceColor currentPlayerTurn = PieceColor.White;
     private bool isGameOver = false;
+    private float whiteTimeRemaining;
+    private float blackTimeRemaining;
+    private Coroutine aiCoroutine;
+    private CancellationTokenSource aiCts;
+    private Task<MinimaxAI.AIMove> activeAiTask;
+    private bool isAIThinking = false;
 
     // --- Component References ---
     private CameraToggle cameraToggle;
@@ -53,17 +97,31 @@ public class GameManager : MonoBehaviour
             occupiedSquares.Add(new Vector2(piece.currentCol, piece.currentRow), piece);
         }
 
+        ResolveHudReferences();
+
+        if (hudCanvas != null && gameModeSelectorCanvas != null && gameModeSelectorCanvas.activeInHierarchy)
+        {
+            hudCanvas.SetActive(false);
+        }
+
+        whiteTimeRemaining = initialTimeSeconds;
+        blackTimeRemaining = initialTimeSeconds;
+        UpdateTimerUI();
+
         // Ensure UI starts clean
         if (gameStatusText != null) gameStatusText.text = "";
-        if (restartButton != null) restartButton.SetActive(false);
+        UpdateActionButtons();
     }
 
     void Update()
     {
-        if (isGameOver || !isGameActive || Time.frameCount == gameStartFrame) return;
+        if (isGameOver || !isGameActive) return;
+
+        TickTimers();
+        if (isGameOver || Time.frameCount == gameStartFrame) return;
 
         // --- Prevent player input during AI's turn ---
-        if (currentMode == GameMode.PvAI && currentPlayerTurn == PieceColor.Black) return;
+        if (isAIThinking || (currentMode == GameMode.PvAI && currentPlayerTurn == PieceColor.Black)) return;
 
         if (Input.GetMouseButtonDown(0))
         {
@@ -114,7 +172,26 @@ public class GameManager : MonoBehaviour
     {
         currentMode = (GameMode)mode;
         isGameActive = true;
+        isGameOver = false;
+        currentPlayerTurn = PieceColor.White;
         gameStartFrame = Time.frameCount;
+
+        CancelAISearch();
+        moveHistory.Clear();
+
+        whiteTimeRemaining = initialTimeSeconds;
+        blackTimeRemaining = initialTimeSeconds;
+        UpdateTimerUI();
+
+        if (hudCanvas != null)
+        {
+            hudCanvas.SetActive(true);
+        }
+
+        if (gameStatusText != null)
+        {
+            gameStatusText.text = "";
+        }
 
         if (cameraToggle != null)
         {
@@ -126,12 +203,210 @@ public class GameManager : MonoBehaviour
         {
             gameModeSelectorCanvas.SetActive(false);
         }
+
+        UpdateActionButtons();
     }
 
-    public void RestartGame()
+    public void UndoLastMove()
     {
-        Time.timeScale = 1f;
-        SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
+        if (!isGameActive || isGameOver || moveHistory.Count == 0) return;
+
+        if (currentMode == GameMode.PvAI)
+        {
+            if (isAIThinking || aiCoroutine != null)
+            {
+                CancelAISearch();
+                UndoSinglePly();
+            }
+            else
+            {
+                int pliesToUndo = Mathf.Min(2, moveHistory.Count);
+                for (int i = 0; i < pliesToUndo; i++)
+                {
+                    UndoSinglePly();
+                    if (currentPlayerTurn == PieceColor.White) break;
+                }
+            }
+        }
+        else
+        {
+            UndoSinglePly();
+        }
+
+        if (cameraToggle != null)
+        {
+            cameraToggle.SetBlackSide(currentPlayerTurn == PieceColor.Black);
+        }
+
+        CheckForGameOver();
+        UpdateActionButtons();
+    }
+
+    public void ResignGame()
+    {
+        if (!isGameActive || isGameOver) return;
+
+        string result = currentMode == GameMode.PvAI
+            ? "White Resigned!\nBlack Wins!"
+            : (currentPlayerTurn == PieceColor.White ? "White Resigned!\nBlack Wins!" : "Black Resigned!\nWhite Wins!");
+        EndGameWithResult(result);
+    }
+
+    public void DrawGame()
+    {
+        if (!isGameActive || isGameOver) return;
+        EndGameWithResult("Draw!\nGame Ended in a Draw.");
+    }
+
+    private void UndoSinglePly()
+    {
+        if (moveHistory.Count == 0) return;
+
+        DeselectPiece();
+        MoveSnapshot snap = moveHistory.Pop();
+
+        occupiedSquares.Remove(new Vector2(snap.toCol, snap.toRow));
+
+        if (snap.promotedQueen != null)
+        {
+            if (snap.promotedPrefabUsed)
+            {
+                Destroy(snap.promotedQueen.gameObject);
+                snap.movedPiece.gameObject.SetActive(true);
+            }
+            else
+            {
+                Destroy(snap.promotedQueen);
+                snap.movedPiece.enabled = true;
+            }
+        }
+
+        snap.movedPiece.RestoreState(snap.fromRow, snap.fromCol, snap.fromHasMoved);
+        occupiedSquares[new Vector2(snap.fromCol, snap.fromRow)] = snap.movedPiece;
+
+        if (snap.castlingRook != null)
+        {
+            occupiedSquares.Remove(new Vector2(snap.rookToCol, snap.fromRow));
+            snap.castlingRook.RestoreState(snap.fromRow, snap.rookFromCol, snap.rookFromHasMoved);
+            occupiedSquares[new Vector2(snap.rookFromCol, snap.fromRow)] = snap.castlingRook;
+        }
+
+        if (snap.capturedPiece != null)
+        {
+            snap.capturedPiece.gameObject.SetActive(true);
+            occupiedSquares[new Vector2(snap.capturedCol, snap.capturedRow)] = snap.capturedPiece;
+        }
+
+        EnPassantTargetRow = snap.prevEnPassantRow;
+        EnPassantTargetCol = snap.prevEnPassantCol;
+        currentPlayerTurn = snap.prevTurn;
+    }
+
+    private void ResolveHudReferences()
+    {
+        if (hudCanvas == null)
+        {
+            GameObject foundHud = GameObject.Find("HUDCanvas");
+            if (foundHud != null) hudCanvas = foundHud;
+        }
+
+        if (hudCanvas == null) return;
+
+        if (playerTimerText == null)
+            playerTimerText = hudCanvas.transform.Find("Player Timer/Remaining Time")?.GetComponent<TextMeshProUGUI>();
+        if (opponentTimerText == null)
+            opponentTimerText = hudCanvas.transform.Find("Opponent Timer/Remaining Time")?.GetComponent<TextMeshProUGUI>();
+        if (undoButton == null)
+            undoButton = hudCanvas.transform.Find("Buttons/Undo")?.GetComponent<Button>();
+        if (resignButton == null)
+            resignButton = hudCanvas.transform.Find("Buttons/Resign")?.GetComponent<Button>();
+        if (drawButton == null)
+            drawButton = hudCanvas.transform.Find("Buttons/Draw")?.GetComponent<Button>();
+    }
+
+    private void TickTimers()
+    {
+        if (currentPlayerTurn == PieceColor.White)
+        {
+            whiteTimeRemaining -= Time.deltaTime;
+            if (whiteTimeRemaining <= 0f)
+            {
+                whiteTimeRemaining = 0f;
+                UpdateTimerUI();
+                EndGameWithResult("Time's Up!\nBlack Wins!");
+                return;
+            }
+        }
+        else
+        {
+            blackTimeRemaining -= Time.deltaTime;
+            if (blackTimeRemaining <= 0f)
+            {
+                blackTimeRemaining = 0f;
+                UpdateTimerUI();
+                EndGameWithResult("Time's Up!\nWhite Wins!");
+                return;
+            }
+        }
+
+        UpdateTimerUI();
+    }
+
+    private void UpdateTimerUI()
+    {
+        if (playerTimerText != null)
+        {
+            playerTimerText.text = FormatTime(whiteTimeRemaining);
+        }
+
+        if (opponentTimerText != null)
+        {
+            opponentTimerText.text = FormatTime(blackTimeRemaining);
+        }
+    }
+
+    private static string FormatTime(float seconds)
+    {
+        int totalSeconds = Mathf.CeilToInt(Mathf.Max(0f, seconds));
+        int minutes = totalSeconds / 60;
+        int secs = totalSeconds % 60;
+        return $"{minutes:00}:{secs:00}";
+    }
+
+    private void UpdateActionButtons()
+    {
+        bool activeMatch = isGameActive && !isGameOver;
+        if (undoButton != null) undoButton.interactable = activeMatch && moveHistory.Count > 0;
+        if (resignButton != null) resignButton.interactable = activeMatch;
+        if (drawButton != null) drawButton.interactable = activeMatch;
+    }
+
+    private void EndGameWithResult(string message)
+    {
+        isGameOver = true;
+        CancelAISearch();
+        DeselectPiece();
+        if (gameStatusText != null) gameStatusText.text = message;
+        UpdateActionButtons();
+    }
+
+    private void CancelAISearch()
+    {
+        isAIThinking = false;
+        if (aiCoroutine != null)
+        {
+            StopCoroutine(aiCoroutine);
+            aiCoroutine = null;
+        }
+        if (aiCts != null)
+        {
+            aiCts.Cancel();
+        }
+    }
+
+    private void OnDestroy()
+    {
+        CancelAISearch();
     }
 
     #region Core Game Logic
@@ -157,6 +432,19 @@ public class GameManager : MonoBehaviour
         int oldRow = pieceToMove.currentRow;
         int oldCol = pieceToMove.currentCol;
 
+        MoveSnapshot snapshot = new MoveSnapshot
+        {
+            movedPiece = pieceToMove,
+            fromRow = oldRow,
+            fromCol = oldCol,
+            fromHasMoved = pieceToMove.hasMoved,
+            toRow = newRow,
+            toCol = newCol,
+            prevEnPassantRow = EnPassantTargetRow,
+            prevEnPassantCol = EnPassantTargetCol,
+            prevTurn = currentPlayerTurn
+        };
+
         ChessPiece targetPiece = GetPieceAt(newRow, newCol);
         bool isEnPassantCapture = pieceToMove.pieceType == PieceType.Pawn &&
                                   targetPiece == null &&
@@ -169,14 +457,20 @@ public class GameManager : MonoBehaviour
             ChessPiece capturedPawn = GetPieceAt(oldRow, newCol);
             if (capturedPawn != null)
             {
+                snapshot.capturedPiece = capturedPawn;
+                snapshot.capturedRow = oldRow;
+                snapshot.capturedCol = newCol;
                 occupiedSquares.Remove(new Vector2(newCol, oldRow));
-                Destroy(capturedPawn.gameObject);
+                capturedPawn.gameObject.SetActive(false);
             }
         }
         else if (targetPiece != null)
         {
+            snapshot.capturedPiece = targetPiece;
+            snapshot.capturedRow = newRow;
+            snapshot.capturedCol = newCol;
             occupiedSquares.Remove(new Vector2(newCol, newRow));
-            Destroy(targetPiece.gameObject);
+            targetPiece.gameObject.SetActive(false);
         }
 
         occupiedSquares.Remove(new Vector2(oldCol, oldRow));
@@ -191,6 +485,10 @@ public class GameManager : MonoBehaviour
             ChessPiece rook = GetPieceAt(oldRow, rookFromCol);
             if (rook != null && rook.pieceType == PieceType.Rook)
             {
+                snapshot.castlingRook = rook;
+                snapshot.rookFromCol = rookFromCol;
+                snapshot.rookToCol = rookToCol;
+                snapshot.rookFromHasMoved = rook.hasMoved;
                 occupiedSquares.Remove(new Vector2(rookFromCol, oldRow));
                 occupiedSquares.Add(new Vector2(rookToCol, oldRow), rook);
                 rook.MoveToSquare(oldRow, rookToCol);
@@ -214,11 +512,13 @@ public class GameManager : MonoBehaviour
             ((pieceToMove.pieceColor == PieceColor.White && newRow == 7) ||
              (pieceToMove.pieceColor == PieceColor.Black && newRow == 0)))
         {
-            PromotePawnToQueen(pieceToMove, newRow, newCol);
+            PromotePawnToQueen(pieceToMove, newRow, newCol, snapshot);
         }
+
+        moveHistory.Push(snapshot);
     }
 
-    private void PromotePawnToQueen(ChessPiece pawn, int row, int col)
+    private void PromotePawnToQueen(ChessPiece pawn, int row, int col, MoveSnapshot snapshot)
     {
         PieceColor color = pawn.pieceColor;
         GameObject prefab = (color == PieceColor.White) ? whiteQueenPrefab : blackQueenPrefab;
@@ -241,14 +541,20 @@ public class GameManager : MonoBehaviour
             queen.ConfigureRuntime(color, PieceType.Queen, row, col, true);
 
             occupiedSquares[new Vector2(col, row)] = queen;
-            Destroy(pawn.gameObject);
+            pawn.gameObject.SetActive(false);
+
+            snapshot.promotedQueen = queen;
+            snapshot.promotedPrefabUsed = true;
         }
         else
         {
             Queen queen = pawn.gameObject.AddComponent<Queen>();
             queen.ConfigureRuntime(color, PieceType.Queen, row, col, true);
             occupiedSquares[new Vector2(col, row)] = queen;
-            Destroy(pawn);
+            pawn.enabled = false;
+
+            snapshot.promotedQueen = queen;
+            snapshot.promotedPrefabUsed = false;
         }
     }
 
@@ -258,15 +564,38 @@ public class GameManager : MonoBehaviour
         if (cameraToggle != null) cameraToggle.ToggleView();
 
         CheckForGameOver();
+        UpdateActionButtons();
 
         if (currentMode == GameMode.PvAI && currentPlayerTurn == PieceColor.Black && !isGameOver)
         {
-            StartCoroutine(TriggerAIMove());
+            aiCoroutine = StartCoroutine(TriggerAIMove());
         }
     }
 
     private IEnumerator TriggerAIMove()
     {
+        isAIThinking = true;
+
+        // Ensure any previously cancelled search finishes before reusing MinimaxAI's internal TT buffer
+        while (activeAiTask != null && !activeAiTask.IsCompleted)
+        {
+            yield return null;
+        }
+
+        if (aiCts != null)
+        {
+            aiCts.Dispose();
+            aiCts = null;
+        }
+
+        yield return new WaitForSeconds(0.1f);
+        if (isGameOver || !isGameActive || currentMode != GameMode.PvAI || currentPlayerTurn != PieceColor.Black)
+        {
+            isAIThinking = false;
+            aiCoroutine = null;
+            yield break;
+        }
+
         MinimaxAI.InternalPiece[,] currentBoard = new MinimaxAI.InternalPiece[8, 8];
         for (int r = 0; r < 8; r++)
         {
@@ -284,11 +613,52 @@ public class GameManager : MonoBehaviour
             }
         }
 
-        yield return new WaitForSeconds(0.1f);
-
         MinimaxAI.SearchRights rights = BuildSearchRights();
-        MinimaxAI.AIMove bestMove = ai.GetBestMove(currentBoard, aiSearchDepth, rights);
+        int depth = Mathf.Max(1, aiSearchDepth);
+        int thinkMs = Mathf.Max(50, aiThinkTimeMs);
 
+        CancellationTokenSource localCts = new CancellationTokenSource();
+        aiCts = localCts;
+        CancellationToken token = localCts.Token;
+
+        Task<MinimaxAI.AIMove> searchTask = Task.Run(
+            () => ai.GetBestMove(currentBoard, depth, rights, thinkMs, token),
+            token);
+        activeAiTask = searchTask;
+
+        while (!searchTask.IsCompleted)
+        {
+            if (isGameOver || token.IsCancellationRequested)
+            {
+                localCts.Cancel();
+                isAIThinking = false;
+                aiCoroutine = null;
+                yield break;
+            }
+            yield return null;
+        }
+
+        isAIThinking = false;
+        aiCoroutine = null;
+
+        if (isGameOver || token.IsCancellationRequested || searchTask.IsCanceled)
+        {
+            yield break;
+        }
+
+        if (searchTask.IsFaulted)
+        {
+            Debug.LogException(searchTask.Exception);
+            yield break;
+        }
+
+        if (aiCts == localCts)
+        {
+            aiCts.Dispose();
+            aiCts = null;
+        }
+
+        MinimaxAI.AIMove bestMove = searchTask.Result;
         if (bestMove.fromRow != bestMove.toRow || bestMove.fromCol != bestMove.toCol)
         {
             ChessPiece pieceToMove = GetPieceAt(bestMove.fromRow, bestMove.fromCol);
@@ -363,21 +733,18 @@ public class GameManager : MonoBehaviour
 
         if (!hasValidMoves)
         {
-            isGameOver = true;
-            if (restartButton != null) restartButton.SetActive(true);
-
             if (king != null && IsSquareAttacked(king.currentRow, king.currentCol, opponentColor))
             {
                 // CHECKMATE
                 string winner = (opponentColor == PieceColor.White) ? "White" : "Black";
                 Debug.Log("CHECKMATE! " + winner + " wins!");
-                if (gameStatusText != null) gameStatusText.text = $"Checkmate!\n{winner} Wins!";
+                EndGameWithResult($"Checkmate!\n{winner} Wins!");
             }
             else
             {
                 // STALEMATE
                 Debug.Log("STALEMATE! It's a draw!");
-                if (gameStatusText != null) gameStatusText.text = "Stalemate!\nIt's a draw.";
+                EndGameWithResult("Stalemate!\nIt's a draw.");
             }
         }
         else

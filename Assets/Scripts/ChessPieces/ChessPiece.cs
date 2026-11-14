@@ -46,4 +46,15 @@ public abstract class ChessPiece : MonoBehaviour
         Vector3 newPosition = new Vector3(col, yAxisHeight, row);
         transform.position = newPosition;
     }
+
+    /// <summary>
+    /// Restores the piece coordinates, movement flag, and world position (used by Undo).
+    /// </summary>
+    public void RestoreState(int row, int col, bool moved)
+    {
+        currentRow = row;
+        currentCol = col;
+        hasMoved = moved;
+        transform.position = new Vector3(col, yAxisHeight, row);
+    }
 }
