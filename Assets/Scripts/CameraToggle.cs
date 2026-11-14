@@ -51,6 +51,17 @@ public class CameraToggle : MonoBehaviour
     }
 
     /// <summary>
+    /// Transitions the camera back to the Main Menu showcase angle.
+    /// </summary>
+    public void EnterMainMenu()
+    {
+        isMainMenu = true;
+        isBlackSide = false;
+        isTacticalView = false;
+        lockCamera = false;
+    }
+
+    /// <summary>
     /// Configures the camera behavior based on the game mode.
     /// Called by GameManager when the game starts.
     /// </summary>
@@ -124,8 +135,8 @@ public class CameraToggle : MonoBehaviour
             targetRotation = isTacticalView ? whiteSideRotation_Tactical : whiteSideRotation_Standard;
         }
 
-        // Use a single Lerp/Slerp to smoothly transition to the target view
-        mainCamera.transform.position = Vector3.Lerp(mainCamera.transform.position, targetPosition, smoothness * Time.deltaTime);
-        mainCamera.transform.rotation = Quaternion.Slerp(mainCamera.transform.rotation, targetRotation, smoothness * Time.deltaTime);
+        // Use a single Lerp/Slerp to smoothly transition to the target view even when Time.timeScale == 0
+        mainCamera.transform.position = Vector3.Lerp(mainCamera.transform.position, targetPosition, smoothness * Time.unscaledDeltaTime);
+        mainCamera.transform.rotation = Quaternion.Slerp(mainCamera.transform.rotation, targetRotation, smoothness * Time.unscaledDeltaTime);
     }
 }

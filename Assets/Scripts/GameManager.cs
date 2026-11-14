@@ -52,6 +52,7 @@ public class GameManager : MonoBehaviour
     public Button undoButton;
     public Button resignButton;
     public Button drawButton;
+    public Button quitButton;
     [SerializeField] private float initialTimeSeconds = 900f; // 15 minutes per side
 
     [Header("Piece Hover Tooltip")]
@@ -84,6 +85,7 @@ public class GameManager : MonoBehaviour
     private bool isAIThinking = false;
     private bool forceCoroutineAISearch = false;
     private bool drawOfferedThisTurn = false;
+    private bool canQuitToMainMenu = false;
     private ChessPiece hoveredPiece;
     private Canvas hudRootCanvas;
 
@@ -118,6 +120,7 @@ public class GameManager : MonoBehaviour
         UpdateTimerUI();
 
         // Ensure UI starts clean
+        canQuitToMainMenu = false;
         if (gameStatusText != null) gameStatusText.text = "";
         HidePieceTooltip();
         UpdateActionButtons();
@@ -199,6 +202,7 @@ public class GameManager : MonoBehaviour
         CancelAISearch();
         moveHistory.Clear();
         drawOfferedThisTurn = false;
+        canQuitToMainMenu = false;
 
         whiteTimeRemaining = initialTimeSeconds;
         blackTimeRemaining = initialTimeSeconds;
@@ -272,7 +276,7 @@ public class GameManager : MonoBehaviour
         string result = currentMode == GameMode.PvAI
             ? "White Resigned!\nBlack Wins!"
             : (currentPlayerTurn == PieceColor.White ? "White Resigned!\nBlack Wins!" : "Black Resigned!\nWhite Wins!");
-        EndGameWithResult(result);
+        EndGameWithResult(result, allowQuit: true);
     }
 
     public void DrawGame()
@@ -281,7 +285,7 @@ public class GameManager : MonoBehaviour
 
         if (currentMode != GameMode.PvAI)
         {
-            EndGameWithResult("Draw!\nGame Ended in a Draw.");
+            EndGameWithResult("Draw!\nGame Ended in a Draw.", allowQuit: true);
             return;
         }
 
@@ -289,7 +293,7 @@ public class GameManager : MonoBehaviour
 
         if (ai == null)
         {
-            EndGameWithResult("Draw!\nGame Ended in a Draw.");
+            EndGameWithResult("Draw!\nGame Ended in a Draw.", allowQuit: true);
             return;
         }
 
@@ -300,7 +304,7 @@ public class GameManager : MonoBehaviour
 
         if (aiScore <= acceptThreshold)
         {
-            EndGameWithResult("Draw Accepted!\nGame Ended in a Draw.");
+            EndGameWithResult("Draw Accepted!\nGame Ended in a Draw.", allowQuit: true);
             return;
         }
 
@@ -310,6 +314,63 @@ public class GameManager : MonoBehaviour
             gameStatusText.text = "AI Declined\nthe Draw.";
         }
         UpdateActionButtons();
+    }
+
+    public void QuitToMainMenu()
+    {
+        if (!canQuitToMainMenu) return;
+
+        isGameActive = false;
+        isGameOver = false;
+        canQuitToMainMenu = false;
+        drawOfferedThisTurn = false;
+
+        CancelAISearch();
+        DeselectPiece();
+        HidePieceTooltip();
+
+        while (moveHistory.Count > 0)
+        {
+            UndoSinglePly();
+        }
+        EnPassantTargetRow = -1;
+        EnPassantTargetCol = -1;
+        currentPlayerTurn = PieceColor.White;
+
+        whiteTimeRemaining = initialTimeSeconds;
+        blackTimeRemaining = initialTimeSeconds;
+        UpdateTimerUI();
+
+        if (gameStatusText != null)
+        {
+            gameStatusText.text = "";
+        }
+
+        UpdateActionButtons();
+
+        if (cameraToggle != null)
+        {
+            cameraToggle.EnterMainMenu();
+        }
+
+        if (hudCanvas != null)
+        {
+            hudCanvas.SetActive(false);
+        }
+
+        if (gameModeSelectorCanvas != null)
+        {
+            gameModeSelectorCanvas.SetActive(true);
+            GameModeSelector selector = gameModeSelectorCanvas.GetComponent<GameModeSelector>();
+            if (selector != null)
+            {
+                selector.CloseHowToPlay();
+            }
+        }
+
+        Time.timeScale = 0f;
+        Cursor.visible = true;
+        Cursor.lockState = CursorLockMode.None;
     }
 
     private int GetAIDrawAcceptThreshold(int aiScore)
@@ -391,6 +452,8 @@ public class GameManager : MonoBehaviour
             resignButton = hudCanvas.transform.Find("Buttons/Resign")?.GetComponent<Button>();
         if (drawButton == null)
             drawButton = hudCanvas.transform.Find("Buttons/Draw")?.GetComponent<Button>();
+        if (quitButton == null)
+            quitButton = (hudCanvas.transform.Find("Right UI Items/Quit") ?? hudCanvas.transform.Find("Buttons/Quit"))?.GetComponent<Button>();
 
         hudRootCanvas = hudCanvas.GetComponent<Canvas>();
         if (pieceTooltipRoot == null)
@@ -557,11 +620,13 @@ public class GameManager : MonoBehaviour
             bool drawBlockedByAI = currentMode == GameMode.PvAI && (drawOfferedThisTurn || isAIThinking);
             drawButton.interactable = activeMatch && !drawBlockedByAI;
         }
+        if (quitButton != null) quitButton.interactable = isGameActive && isGameOver && canQuitToMainMenu;
     }
 
-    private void EndGameWithResult(string message)
+    private void EndGameWithResult(string message, bool allowQuit = false)
     {
         isGameOver = true;
+        canQuitToMainMenu = allowQuit;
         CancelAISearch();
         DeselectPiece();
         HidePieceTooltip();
