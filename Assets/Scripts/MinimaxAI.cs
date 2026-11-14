@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
@@ -89,10 +90,11 @@ public class MinimaxAI : MonoBehaviour
         public readonly AIMove[,] killerMoves = new AIMove[MaxSearchPly, 2];
         public readonly int[,,] history = new int[2, 64, 64];
         public readonly Stopwatch stopwatch = new Stopwatch();
-        public readonly System.Random rng = new System.Random();
 
         public int timeLimitMs;
+        public bool ignoreTimeLimit;
         public CancellationToken cancellationToken;
+        public Func<bool> cancelPredicate;
         public int nodes;
         public byte ttGeneration;
 
@@ -280,62 +282,34 @@ public class MinimaxAI : MonoBehaviour
         lock (searchLock)
         {
             SearchContext ctx = reusableContext;
-            Array.Copy(board, ctx.board, 64);
-            ctx.ClearHeuristics();
-            ctx.timeLimitMs = timeLimitMs;
-            ctx.cancellationToken = cancellationToken;
-            ctx.nodes = 0;
-            searchGeneration++;
-            if (searchGeneration == 0) searchGeneration = 1;
-            ctx.ttGeneration = searchGeneration;
-            ctx.stopwatch.Restart();
-
-            int rootCount = GenerateLegalMovesInto(ctx.board, PieceColor.Black, rights, ctx.moveBuffers[0]);
-            if (rootCount == 0)
+            if (!PrepareRootSearch(ctx, board, rights, timeLimitMs, cancellationToken, null, out AIMove[] rootMoves, out int rootCount, out ulong rootHash))
             {
-                ctx.stopwatch.Stop();
                 return new AIMove();
             }
 
-            AIMove[] rootMoves = new AIMove[rootCount];
-            Array.Copy(ctx.moveBuffers[0], rootMoves, rootCount);
-            OrderMoves(ctx.board, rootMoves, rootCount, default, ctx, 0, PieceColor.Black);
-
-            ulong rootHash = ComputeHash(ctx.board, PieceColor.Black, rights);
             AIMove overallBest = rootMoves[0];
             bool hasCompletedDepth = false;
 
             for (int depth = 1; depth <= maxDepth; depth++)
             {
-                if (depth > 1 && (cancellationToken.IsCancellationRequested || (timeLimitMs > 0 && ctx.stopwatch.ElapsedMilliseconds >= timeLimitMs)))
+                if (depth > 1 && ShouldStopSearch(ctx, timeLimitMs))
                 {
                     break;
                 }
 
-                // Move previous iteration's best move to the front of rootMoves
                 if (hasCompletedDepth)
                 {
-                    for (int i = 1; i < rootCount; i++)
-                    {
-                        if (rootMoves[i].Equals(overallBest))
-                        {
-                            rootMoves[i] = rootMoves[0];
-                            rootMoves[0] = overallBest;
-                            break;
-                        }
-                    }
+                    PromoteRootMove(rootMoves, rootCount, overallBest);
                 }
 
-                try
-                {
-                    AIMove iterBest = SearchRoot(ctx, rootMoves, rootCount, depth, rights, rootHash, out _);
-                    overallBest = iterBest;
-                    hasCompletedDepth = true;
-                }
-                catch (OperationCanceledException)
+                ctx.ignoreTimeLimit = depth == 1;
+                if (!TrySearchRootSync(ctx, rootMoves, rootCount, depth, rights, rootHash, out AIMove iterBest))
                 {
                     break;
                 }
+
+                overallBest = iterBest;
+                hasCompletedDepth = true;
             }
 
             ctx.stopwatch.Stop();
@@ -343,30 +317,221 @@ public class MinimaxAI : MonoBehaviour
         }
     }
 
-    private AIMove SearchRoot(SearchContext ctx, AIMove[] rootMoves, int rootCount, int depth, SearchRights rights, ulong rootHash, out int bestScore)
+    /// <summary>
+    /// Time-sliced iterative deepening coroutine for single-threaded platforms (such as WebGL without threads).
+    /// Yields between root moves whenever <paramref name="frameBudgetMs"/> is exceeded and between depths.
+    /// </summary>
+    public IEnumerator GetBestMoveCoroutine(
+        InternalPiece[,] board,
+        int maxDepth,
+        SearchRights rights,
+        int timeLimitMs,
+        Action<AIMove> onCompleted,
+        Func<bool> shouldCancel = null,
+        int frameBudgetMs = 15)
     {
-        bestScore = -Infinity;
+        if (board == null || maxDepth <= 0)
+        {
+            onCompleted?.Invoke(new AIMove());
+            yield break;
+        }
+
+        SearchContext ctx = reusableContext;
+        if (!PrepareRootSearch(ctx, board, rights, timeLimitMs, CancellationToken.None, shouldCancel, out AIMove[] rootMoves, out int rootCount, out ulong rootHash))
+        {
+            onCompleted?.Invoke(new AIMove());
+            yield break;
+        }
+
+        AIMove overallBest = rootMoves[0];
+        bool hasCompletedDepth = false;
+        bool abortedByTimeLimit = false;
+        Stopwatch frameWatch = Stopwatch.StartNew();
+
+        for (int depth = 1; depth <= maxDepth && !abortedByTimeLimit; depth++)
+        {
+            if (shouldCancel != null && shouldCancel())
+            {
+                ctx.stopwatch.Stop();
+                yield break;
+            }
+
+            if (depth > 1 && timeLimitMs > 0 && ctx.stopwatch.ElapsedMilliseconds >= timeLimitMs)
+            {
+                break;
+            }
+
+            if (hasCompletedDepth)
+            {
+                PromoteRootMove(rootMoves, rootCount, overallBest);
+            }
+
+            ctx.ignoreTimeLimit = depth == 1;
+            int bestScore = -Infinity;
+            int alpha = -Infinity;
+            int beta = Infinity;
+            AIMove iterBest = rootMoves[0];
+            bool depthCompleted = true;
+
+            for (int i = 0; i < rootCount; i++)
+            {
+                if (shouldCancel != null && shouldCancel())
+                {
+                    ctx.stopwatch.Stop();
+                    yield break;
+                }
+
+                if (!TryEvaluateRootMove(ctx, rootMoves[i], depth, rights, rootHash, ref alpha, beta, ref bestScore, ref iterBest))
+                {
+                    if (shouldCancel != null && shouldCancel())
+                    {
+                        ctx.stopwatch.Stop();
+                        yield break;
+                    }
+                    depthCompleted = false;
+                    abortedByTimeLimit = true;
+                    break;
+                }
+
+                if (frameBudgetMs > 0 && i + 1 < rootCount && frameWatch.ElapsedMilliseconds >= frameBudgetMs)
+                {
+                    yield return null;
+                    frameWatch.Restart();
+                }
+            }
+
+            if (depthCompleted)
+            {
+                overallBest = iterBest;
+                hasCompletedDepth = true;
+            }
+
+            if (frameBudgetMs > 0 && !abortedByTimeLimit && depth < maxDepth)
+            {
+                yield return null;
+                frameWatch.Restart();
+            }
+        }
+
+        ctx.stopwatch.Stop();
+        if (shouldCancel != null && shouldCancel())
+        {
+            yield break;
+        }
+
+        onCompleted?.Invoke(hasCompletedDepth ? overallBest : new AIMove());
+    }
+
+    private bool PrepareRootSearch(
+        SearchContext ctx,
+        InternalPiece[,] board,
+        SearchRights rights,
+        int timeLimitMs,
+        CancellationToken cancellationToken,
+        Func<bool> cancelPredicate,
+        out AIMove[] rootMoves,
+        out int rootCount,
+        out ulong rootHash)
+    {
+        Array.Copy(board, ctx.board, 64);
+        ctx.ClearHeuristics();
+        ctx.timeLimitMs = timeLimitMs;
+        ctx.ignoreTimeLimit = false;
+        ctx.cancellationToken = cancellationToken;
+        ctx.cancelPredicate = cancelPredicate;
+        ctx.nodes = 0;
+
+        searchGeneration++;
+        if (searchGeneration == 0) searchGeneration = 1;
+        ctx.ttGeneration = searchGeneration;
+        ctx.stopwatch.Restart();
+
+        rootCount = GenerateLegalMovesInto(ctx.board, PieceColor.Black, rights, ctx.moveBuffers[0]);
+        if (rootCount == 0)
+        {
+            ctx.stopwatch.Stop();
+            rootMoves = null;
+            rootHash = 0;
+            return false;
+        }
+
+        rootMoves = new AIMove[rootCount];
+        Array.Copy(ctx.moveBuffers[0], rootMoves, rootCount);
+        OrderMoves(ctx.board, rootMoves, rootCount, default, ctx, 0, PieceColor.Black);
+        rootHash = ComputeHash(ctx.board, PieceColor.Black, rights);
+        return true;
+    }
+
+    private static bool ShouldStopSearch(SearchContext ctx, int timeLimitMs)
+    {
+        if (ctx.cancellationToken.IsCancellationRequested) return true;
+        if (ctx.cancelPredicate != null && ctx.cancelPredicate()) return true;
+        return timeLimitMs > 0 && ctx.stopwatch.ElapsedMilliseconds >= timeLimitMs;
+    }
+
+    private static void PromoteRootMove(AIMove[] rootMoves, int rootCount, AIMove best)
+    {
+        for (int i = 1; i < rootCount; i++)
+        {
+            if (rootMoves[i].Equals(best))
+            {
+                rootMoves[i] = rootMoves[0];
+                rootMoves[0] = best;
+                break;
+            }
+        }
+    }
+
+    private bool TrySearchRootSync(SearchContext ctx, AIMove[] rootMoves, int rootCount, int depth, SearchRights rights, ulong rootHash, out AIMove bestMove)
+    {
+        int bestScore = -Infinity;
         int alpha = -Infinity;
         int beta = Infinity;
-        AIMove bestMove = rootMoves[0];
+        bestMove = rootMoves[0];
 
         for (int i = 0; i < rootCount; i++)
         {
-            AIMove move = rootMoves[i];
-            MakeMove(ctx.board, move, PieceColor.Black, ref rights, ref rootHash, out UndoInfo undo);
-            int eval = NegamaxMinimax(ctx, depth - 1, 1, alpha, beta, false, rights, rootHash);
-            UnmakeMove(ctx.board, move, ref rights, ref rootHash, in undo);
-
-            if (eval > bestScore)
+            if (!TryEvaluateRootMove(ctx, rootMoves[i], depth, rights, rootHash, ref alpha, beta, ref bestScore, ref bestMove))
             {
-                bestScore = eval;
-                bestMove = move;
+                return false;
             }
-
-            if (eval > alpha) alpha = eval;
         }
 
-        return bestMove;
+        return true;
+    }
+
+    private bool TryEvaluateRootMove(
+        SearchContext ctx,
+        AIMove move,
+        int depth,
+        SearchRights rights,
+        ulong rootHash,
+        ref int alpha,
+        int beta,
+        ref int bestScore,
+        ref AIMove bestMove)
+    {
+        MakeMove(ctx.board, move, PieceColor.Black, ref rights, ref rootHash, out UndoInfo undo);
+        int eval;
+        try
+        {
+            eval = NegamaxMinimax(ctx, depth - 1, 1, alpha, beta, false, rights, rootHash);
+        }
+        catch (OperationCanceledException)
+        {
+            UnmakeMove(ctx.board, move, ref rights, ref rootHash, in undo);
+            return false;
+        }
+        UnmakeMove(ctx.board, move, ref rights, ref rootHash, in undo);
+
+        if (eval > bestScore)
+        {
+            bestScore = eval;
+            bestMove = move;
+        }
+
+        if (eval > alpha) alpha = eval;
+        return true;
     }
 
     private int NegamaxMinimax(SearchContext ctx, int depth, int ply, int alpha, int beta, bool isMaximizing, SearchRights rights, ulong hash)
@@ -561,7 +726,11 @@ public class MinimaxAI : MonoBehaviour
         if ((ctx.nodes & 2047) != 0) return;
 
         ctx.cancellationToken.ThrowIfCancellationRequested();
-        if (ctx.timeLimitMs > 0 && ctx.stopwatch.ElapsedMilliseconds >= ctx.timeLimitMs)
+        if (ctx.cancelPredicate != null && ctx.cancelPredicate())
+        {
+            throw new OperationCanceledException();
+        }
+        if (!ctx.ignoreTimeLimit && ctx.timeLimitMs > 0 && ctx.stopwatch.ElapsedMilliseconds >= ctx.timeLimitMs)
         {
             throw new OperationCanceledException();
         }

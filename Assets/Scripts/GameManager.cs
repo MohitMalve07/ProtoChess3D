@@ -77,6 +77,7 @@ public class GameManager : MonoBehaviour
     private CancellationTokenSource aiCts;
     private Task<MinimaxAI.AIMove> activeAiTask;
     private bool isAIThinking = false;
+    private bool forceCoroutineAISearch = false;
 
     // --- Component References ---
     private CameraToggle cameraToggle;
@@ -617,6 +618,49 @@ public class GameManager : MonoBehaviour
         int depth = Mathf.Max(1, aiSearchDepth);
         int thinkMs = Mathf.Max(50, aiThinkTimeMs);
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+        yield return RunAICoroutineSearch(currentBoard, depth, rights, thinkMs);
+#else
+        if (forceCoroutineAISearch)
+        {
+            yield return RunAICoroutineSearch(currentBoard, depth, rights, thinkMs);
+        }
+        else
+        {
+            yield return RunAIBackgroundSearch(currentBoard, depth, rights, thinkMs);
+        }
+#endif
+    }
+
+    private IEnumerator RunAICoroutineSearch(MinimaxAI.InternalPiece[,] currentBoard, int depth, MinimaxAI.SearchRights rights, int thinkMs)
+    {
+        MinimaxAI.AIMove bestMove = default;
+        bool completed = false;
+
+        yield return ai.GetBestMoveCoroutine(
+            currentBoard,
+            depth,
+            rights,
+            thinkMs,
+            result =>
+            {
+                bestMove = result;
+                completed = true;
+            },
+            () => !isAIThinking || isGameOver || !isGameActive || currentMode != GameMode.PvAI || currentPlayerTurn != PieceColor.Black);
+
+        bool stillValid = isAIThinking && !isGameOver && isGameActive && currentMode == GameMode.PvAI && currentPlayerTurn == PieceColor.Black;
+        isAIThinking = false;
+        aiCoroutine = null;
+
+        if (completed && stillValid)
+        {
+            ApplyAIMove(bestMove);
+        }
+    }
+
+    private IEnumerator RunAIBackgroundSearch(MinimaxAI.InternalPiece[,] currentBoard, int depth, MinimaxAI.SearchRights rights, int thinkMs)
+    {
         CancellationTokenSource localCts = new CancellationTokenSource();
         aiCts = localCts;
         CancellationToken token = localCts.Token;
@@ -658,7 +702,11 @@ public class GameManager : MonoBehaviour
             aiCts = null;
         }
 
-        MinimaxAI.AIMove bestMove = searchTask.Result;
+        ApplyAIMove(searchTask.Result);
+    }
+
+    private void ApplyAIMove(MinimaxAI.AIMove bestMove)
+    {
         if (bestMove.fromRow != bestMove.toRow || bestMove.fromCol != bestMove.toCol)
         {
             ChessPiece pieceToMove = GetPieceAt(bestMove.fromRow, bestMove.fromCol);

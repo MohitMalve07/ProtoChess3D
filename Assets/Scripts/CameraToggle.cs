@@ -83,14 +83,23 @@ public class CameraToggle : MonoBehaviour
         isBlackSide = blackSide;
     }
 
+    /// <summary>
+    /// Toggles between Standard and Tactical Top-Down camera views during active gameplay.
+    /// </summary>
+    public void ToggleCameraView()
+    {
+        if (isMainMenu) return;
+        isTacticalView = !isTacticalView;
+    }
+
     void Update()
     {
         if (mainCamera == null) return;
 
         // Check for the "T" key press to toggle the view mode
-        if (!isMainMenu && Input.GetKeyDown(KeyCode.T))
+        if (Input.GetKeyDown(KeyCode.T))
         {
-            isTacticalView = !isTacticalView;
+            ToggleCameraView();
         }
 
         // Determine the target position and rotation based on the current state
